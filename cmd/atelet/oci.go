@@ -150,6 +150,7 @@ func prepareOCIDirectory(ctx context.Context, imageCache *imagecache.Store, acto
 	}
 
 	ociSpec := buildActorOCISpec(actorUID, containerName, resolvedArgs, resolvedEnv, annotations, netns, volumes, volumeMounts, capabilities)
+	ociSpec.Process.Cwd = resolveProcessCwd(&img.Config)
 	ociSpecBytes, err := json.MarshalIndent(ociSpec, "", "  ")
 	if err != nil {
 		return fmt.Errorf("while marshaling OCI spec: %w", err)
@@ -259,6 +260,16 @@ func resolveProcessArgs(imageCfg *v1.Config, command, args []string) ([]string, 
 		return nil, fmt.Errorf("%w: no command specified: image defines neither ENTRYPOINT nor CMD and the container sets neither command nor args", ateerrors.ReasonInvalidContainerConfig)
 	}
 	return argv, nil
+}
+
+// resolveProcessCwd preserves the image working directory, matching container
+// runtime behavior. OCI requires an absolute directory, and image configs use
+// an empty value to mean the root directory.
+func resolveProcessCwd(imageCfg *v1.Config) string {
+	if imageCfg != nil && imageCfg.WorkingDir != "" {
+		return imageCfg.WorkingDir
+	}
+	return "/"
 }
 
 // buildActorOCISpec assembles the OCI runtime spec for an actor container from

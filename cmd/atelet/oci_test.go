@@ -205,6 +205,37 @@ func TestResolveProcessArgs(t *testing.T) {
 	}
 }
 
+func TestResolveProcessCwd(t *testing.T) {
+	tests := []struct {
+		name  string
+		image *v1.Config
+		want  string
+	}{
+		{
+			name:  "uses image working directory",
+			image: &v1.Config{WorkingDir: "/app"},
+			want:  "/app",
+		},
+		{
+			name:  "defaults empty image directory to root",
+			image: &v1.Config{},
+			want:  "/",
+		},
+		{
+			name: "defaults nil image config to root",
+			want: "/",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := resolveProcessCwd(test.image); got != test.want {
+				t.Errorf("resolveProcessCwd() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 // Each durable-dir volume mount becomes a bind mount whose source is the
 // per-actor on-host DurableDirVolumeMountPoint for that volume name.
 func TestBuildActorOCISpec_DurableDirVolumeMounts(t *testing.T) {
