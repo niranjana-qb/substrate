@@ -17,10 +17,14 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"testing"
+
+	specs "github.com/opencontainers/runtime-spec/specs-go"
 
 	"github.com/agent-substrate/substrate/internal/ateompath"
 )
@@ -85,5 +89,84 @@ func TestWaitArgs(t *testing.T) {
 
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("waitArgs() = %v, want %v", got, want)
+	}
+}
+
+// fakeRunscState builds an executable shell script standing in for `runsc`
+// that prints stdout (unconditionally, ignoring its args) and exits 0. It
+// lets stateJSON's parsing be tested without a real runsc/gVisor sandbox.
+func fakeRunscState(t *testing.T, stdout string) string {
+	t.Helper()
+	if runtime.GOOS != "linux" {
+		t.Skip("fake runsc script requires a POSIX shell")
+	}
+	path := filepath.Join(t.TempDir(), "fake-runsc.sh")
+	script := "#!/bin/sh\ncat <<'EOF'\n" + stdout + "\nEOF\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("writing fake runsc script: %v", err)
+	}
+	return path
+}
+
+func TestRunscStateJSON(t *testing.T) {
+	tests := []struct {
+		name    string
+		stdout  string
+		want    *specs.State
+		wantErr bool
+	}{
+		{
+			name:   "running",
+			stdout: `{"ociVersion":"1.0.2","id":"agent","status":"running","pid":42,"bundle":"/bundle"}`,
+			want:   &specs.State{Version: "1.0.2", ID: "agent", Status: specs.StateRunning, Pid: 42, Bundle: "/bundle"},
+		},
+		{
+			name:   "stopped",
+			stdout: `{"ociVersion":"1.0.2","id":"agent","status":"stopped","bundle":"/bundle"}`,
+			want:   &specs.State{Version: "1.0.2", ID: "agent", Status: specs.StateStopped, Bundle: "/bundle"},
+		},
+		{
+			name:    "malformed JSON",
+			stdout:  `not json`,
+			wantErr: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			r := &runsc{
+				path:     fakeRunscState(t, test.stdout),
+				actorUID: "test-actor-123",
+			}
+
+			got, err := r.stateJSON(context.Background(), "agent")
+			if test.wantErr {
+				if err == nil {
+					t.Fatalf("stateJSON() = %+v, want error", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("stateJSON() unexpected error: %v", err)
+			}
+			if !reflect.DeepEqual(got, test.want) {
+				t.Errorf("stateJSON() = %+v, want %+v", got, test.want)
+			}
+		})
+	}
+}
+
+// TestRunscStateJSON_CommandError checks that a nonzero exit from the runsc
+// binary itself (not the JSON body) surfaces as an error, e.g. when the
+// container does not exist.
+func TestRunscStateJSON_CommandError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "fake-runsc-fail.sh")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatalf("writing fake runsc script: %v", err)
+	}
+	r := &runsc{path: path, actorUID: "test-actor-123"}
+
+	if _, err := r.stateJSON(context.Background(), "agent"); err == nil {
+		t.Fatal("stateJSON() = nil error, want error for nonzero exit")
 	}
 }

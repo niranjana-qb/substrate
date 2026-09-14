@@ -34,6 +34,8 @@ import (
 	"time"
 
 	"cloud.google.com/go/compute/metadata"
+	specs "github.com/opencontainers/runtime-spec/specs-go"
+
 	"github.com/agent-substrate/substrate/cmd/ateom-gvisor/internal/cgroupstats"
 	"github.com/agent-substrate/substrate/internal/actorlog"
 	"github.com/agent-substrate/substrate/internal/ateinterceptors"
@@ -697,6 +699,7 @@ func (s *AteomService) RunWorkload(ctx context.Context, req *ateompb.RunWorkload
 		if err := rcmd.cmdStart(ctx, pw, ac.GetName()); err != nil {
 			return nil, fmt.Errorf("while starting %q application container: %w", ac.GetName(), err)
 		}
+		logContainerLiveness(ctx, rcmd, ac.GetName())
 	}
 
 	// Block until every readyz-enabled container reports 200.
@@ -822,6 +825,32 @@ func listSnapshotFiles(dir string) ([]string, error) {
 	}
 	sort.Strings(files)
 	return files, nil
+}
+
+// logContainerLiveness is a best-effort diagnostic for the gap between
+// `runsc start` returning success and readyz.WaitAll's first probe: a status 0
+// exit from `runsc start` only means the sentry accepted the request, not that
+// the container's init process is still running. It never returns an error or
+// affects control flow; readiness/lifecycle decisions still rest solely on
+// readyz.WaitAll below.
+func logContainerLiveness(ctx context.Context, r *runsc, containerName string) {
+	state, err := r.stateJSON(ctx, containerName)
+	if err != nil {
+		slog.WarnContext(ctx, "container state unavailable after start",
+			slog.String("container", containerName), slog.Any("err", err))
+		return
+	}
+	switch state.Status {
+	case specs.StateRunning:
+		slog.InfoContext(ctx, "container process alive after start",
+			slog.String("container", containerName), slog.Int("pid", state.Pid))
+	case specs.StateStopped:
+		slog.WarnContext(ctx, "container process not running after start",
+			slog.String("container", containerName))
+	default:
+		slog.InfoContext(ctx, "container state unavailable after start",
+			slog.String("container", containerName), slog.String("status", string(state.Status)))
+	}
 }
 
 func (r *runsc) stopContainers(ctx context.Context, containers []*ateompb.Container) {
@@ -980,6 +1009,7 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 			if err := rcmd.cmdStart(ctx, pw, ac.GetName()); err != nil {
 				return nil, fmt.Errorf("while starting %q application container: %w", ac.GetName(), err)
 			}
+			logContainerLiveness(ctx, rcmd, ac.GetName())
 		case ateompb.SnapshotScope_SNAPSHOT_SCOPE_FULL:
 			containersToDelete = append(containersToDelete, ac.GetName())
 			if err := rcmd.cmdCreate(ctx, pw, ac.GetName(), nil); err != nil {
@@ -988,6 +1018,7 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 			if err := rcmd.cmdRestore(ctx, pw, ac.GetName(), checkpointDir); err != nil {
 				return nil, fmt.Errorf("while starting %q application container: %w", ac.GetName(), err)
 			}
+			logContainerLiveness(ctx, rcmd, ac.GetName())
 		default:
 			return nil, fmt.Errorf("unexpected snapshot scope: %v", req.GetScope())
 		}

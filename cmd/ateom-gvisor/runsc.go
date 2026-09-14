@@ -17,6 +17,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -335,6 +336,39 @@ func (r *runsc) cmdState(ctx context.Context, containerName string) error {
 		return fmt.Errorf("while running `runsc state`: %w", err)
 	}
 	return nil
+}
+
+// stateJSON runs `runsc state` for containerName and parses its stdout as an
+// OCI runtime State (see specs.State: Status is one of creating/created/
+// running/stopped, with Pid set while running). Diagnostic-only: callers use
+// this to observe whether a container's init process is still alive shortly
+// after `runsc start`, distinct from cmdState's containerd-style existence
+// check before delete.
+func (r *runsc) stateJSON(ctx context.Context, containerName string) (*specs.State, error) {
+	reapLock.RLock()
+	defer reapLock.RUnlock()
+
+	var stdout bytes.Buffer
+	cmd := exec.CommandContext(
+		ctx,
+		r.path,
+		"-log-format", "json",
+		"--alsologtostderr",
+		"-root", ateompath.RunSCStateDir(r.actorUID),
+		"state",
+		containerName,
+	)
+	cmd.Stdout = &stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("while running `runsc state`: %w", err)
+	}
+
+	var state specs.State
+	if err := json.Unmarshal(stdout.Bytes(), &state); err != nil {
+		return nil, fmt.Errorf("while parsing `runsc state` output: %w", err)
+	}
+	return &state, nil
 }
 
 // killArgs builds the argv for `runsc kill <container> <signal>`. Factored out
